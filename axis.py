@@ -1,8 +1,9 @@
 import random
 import cocotb
-from packet import Packet
+from coco_env.packet import Packet
+from coco_env.bin_operation import countones
 from cocotb.triggers import RisingEdge
-    
+
 class axis_if:
     def __init__(self, aclk, tdata, tvalid, tkeep, tlast, tuser, tready, width=4):
         self.aclk = aclk
@@ -20,8 +21,10 @@ class axis_if:
 
 class axis_drv:
 
-    def __init__(self, axis_if):
+    def __init__(self, name, axis_if, width = 4):
+        self.name = name
         self.axis_if = axis_if
+        self.width = width
 
     async def send_pkt(self, pkt):
         pkt.check_pkt()
@@ -31,7 +34,10 @@ class axis_drv:
         while word_num < len(pkt.data):
             #EOP generation
             if(word_num == len(pkt.data)-1):
-                self.axis_if.tlast.value = 1                            
+                self.axis_if.tlast.value = 1
+                self.axis_if.tkeep.value = (1 << (pkt.pkt_size % self.width))-1
+            else:
+                self.axis_if.tkeep.value = (1 << (self.width))-1
             self.axis_if.tdata.value = pkt.data[word_num]
             self.axis_if.tvalid.value = 1
             await RisingEdge(self.axis_if.aclk)
@@ -45,14 +51,16 @@ class axis_drv:
 #----------------------------------------------
 
 class axis_mon:
-    def __init__(self, axis_if, aport, width = 4, corrupt = 0):
+    def __init__(self, name, axis_if, aport, width = 4, corrupt = 0):
+        self.name    = name
         self.width   = width
         self.aport   = aport
         self.axis_if = axis_if        
         self.data    = []
         self.corrupt = corrupt
         
-    async def mon_if(self):            
+    async def mon_if(self):
+        pkt_cntr = 1
         while(True):
             await RisingEdge(self.axis_if.aclk)
             if(self.axis_if.tvalid.value == 1 and self.axis_if.tready.value == 1):
@@ -66,10 +74,13 @@ class axis_mon:
                         self.data[corr_word_pos] = self.data[corr_word_pos] ^ corr_data
                     pkt_mon = Packet(self.width)
                     pkt_mon.data = self.data.copy()
+                    pkt_mon.pkt_size = self.width*(len(self.data)-1) + countones(self.axis_if.tkeep.value)
                     # Clear data
                     self.data = []
-                    pkt_mon.print_pkt()
+                    mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
+                    pkt_mon.print_pkt(mon_str)
                     self.aport.append(pkt_mon)
+                    pkt_cntr += 1
                     
 
 #----------------------------------------------
@@ -78,7 +89,8 @@ class axis_mon:
 
 class axis_rsp:
 
-    def __init__(self, axis_if, behaviour = 'ALWAYS_READY'):
+    def __init__(self, name, axis_if, behaviour = 'ALWAYS_READY'):
+        self.name = name
         self.axis_if = axis_if
         self.behaviour = behaviour
 
@@ -88,12 +100,18 @@ class axis_rsp:
         elif(self.behaviour == 'BACKPRESSURE_1'):
             while True:
                 self.axis_if.tready.value = 1
-                await RisingEdge(self.axis_if.tvalid)
+                if self.axis_if.tvalid.value == 0:
+                    await RisingEdge(self.axis_if.tvalid)
                 await RisingEdge(self.axis_if.aclk)
-                self.axis_if.tready.value = 0
-                for cycle_num in range(0,5):
+                self.axis_if.tready.value = 1
+                interval = random.randint(1,5)
+                for cycle_num in range(0,interval):
                     await RisingEdge(self.axis_if.aclk)
-        elif(self.behaviour == 'BACKPRESSURE_1'):
+                self.axis_if.tready.value = 0
+                interval = random.randint(1,5)
+                for cycle_num in range(0,interval):
+                    await RisingEdge(self.axis_if.aclk)                        
+        elif(self.behaviour == 'BACKPRESSURE_0'):
             while True:
                 self.axis_if.tready.value = 1
                 await RisingEdge(self.axis_if.tvalid)
