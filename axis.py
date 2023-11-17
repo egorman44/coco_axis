@@ -5,7 +5,7 @@ from coco_env.bin_operation import countones
 from cocotb.triggers import RisingEdge
 
 class axis_if:
-    def __init__(self, aclk, tdata, tvalid, tkeep, tlast, tuser, tready, width=4):
+    def __init__(self, aclk, tdata, tvalid, tlast, tkeep=None, tuser=None, tready=None, width=4):
         self.aclk = aclk
         self.tdata = tdata
         self.tvalid = tvalid
@@ -14,7 +14,7 @@ class axis_if:
         self.tuser = tuser
         self.tready = tready
         self.width = width
-
+        
 #----------------------------------------------
 # Axis Driver.
 #----------------------------------------------
@@ -32,16 +32,24 @@ class axis_drv:
             await RisingEdge(self.axis_if.aclk)
         word_num = 0
         while word_num < len(pkt.data):
-            #EOP generation
+            #TKEEP generation
+            if self.axis_if.tkeep is not None:
+                if(word_num == len(pkt.data)-1):
+                    self.axis_if.tkeep.value = (1 << (pkt.pkt_size % self.width))-1
+                else:
+                    self.axis_if.tkeep.value = (1 << (self.width))-1
+            #TLAST generation
             if(word_num == len(pkt.data)-1):
                 self.axis_if.tlast.value = 1
-                self.axis_if.tkeep.value = (1 << (pkt.pkt_size % self.width))-1
-            else:
-                self.axis_if.tkeep.value = (1 << (self.width))-1
             self.axis_if.tdata.value = pkt.data[word_num]
             self.axis_if.tvalid.value = 1
             await RisingEdge(self.axis_if.aclk)
-            if(self.axis_if.tready.value == 1):
+            # If backpressure is enabled wait for TREADY to
+            # send the next word.
+            if(self.axis_if.tready is not None):
+                if(self.axis_if.tready.value == 1):
+                    word_num += 1
+            else:
                 word_num += 1
         self.axis_if.tvalid.value = 0
         self.axis_if.tlast.value = 0
