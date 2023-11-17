@@ -82,7 +82,12 @@ class axis_mon:
                         self.data[corr_word_pos] = self.data[corr_word_pos] ^ corr_data
                     pkt_mon = Packet(self.width)
                     pkt_mon.data = self.data.copy()
-                    pkt_mon.pkt_size = self.width*(len(self.data)-1) + countones(self.axis_if.tkeep.value)
+                    # If TKEEP is not conencted then treat all
+                    # words as full
+                    if self.axis_if.tkeep is not None:
+                        pkt_mon.pkt_size = self.width*(len(self.data)-1) + countones(self.axis_if.tkeep.value)
+                    else:
+                        pkt_mon.pkt_size = self.width*(len(self.data))                
                     # Clear data
                     self.data = []
                     mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
