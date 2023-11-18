@@ -5,15 +5,16 @@ from coco_env.bin_operation import countones
 from cocotb.triggers import RisingEdge
 
 class axis_if:
-    def __init__(self, aclk, tdata, tvalid, tlast, tkeep=None, tuser=None, tready=None, width=4):
-        self.aclk = aclk
-        self.tdata = tdata
+    def __init__(self, aclk, tdata, tvalid, tlast, tkeep=None, tuser=None, tready=None, sop=None, width=4):
+        self.aclk   = aclk
+        self.tdata  = tdata
         self.tvalid = tvalid
-        self.tkeep = tkeep
-        self.tlast = tlast
-        self.tuser = tuser
+        self.tkeep  = tkeep
+        self.tlast  = tlast
+        self.tuser  = tuser
+        self.sop    = sop
         self.tready = tready
-        self.width = width
+        self.width  = width
         
 #----------------------------------------------
 # Axis Driver.
@@ -32,6 +33,12 @@ class axis_drv:
             await RisingEdge(self.axis_if.aclk)
         word_num = 0
         while word_num < len(pkt.data):
+            #SOP generation
+            if self.axis_if.sop is not None:
+                if(word_num == 0):
+                    self.axis_if.sop.value = 1
+                else:
+                    self.axis_if.sop.value = 0
             #TKEEP generation
             if self.axis_if.tkeep is not None:
                 if(word_num == len(pkt.data)-1):
@@ -71,7 +78,11 @@ class axis_mon:
         pkt_cntr = 1
         while(True):
             await RisingEdge(self.axis_if.aclk)
-            if(self.axis_if.tvalid.value == 1 and self.axis_if.tready.value == 1):
+            if(self.axis_if.tready is None):
+                tnx_completed = self.axis_if.tvalid.value
+            else:
+                tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
+            if(tnx_completed):
                 self.data.append(self.axis_if.tdata.value.integer)
                 if(self.axis_if.tlast.value == 1):
                     # Intentionally corrupt the packet                    
