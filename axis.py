@@ -4,7 +4,7 @@ from coco_env.packet import Packet
 from coco_env.bin_operation import countones
 from cocotb.triggers import RisingEdge
 
-class axis_if:
+class AxisIf:
     def __init__(self, aclk, tdata, tvalid, tlast, tkeep=None, tuser=None, tready=None, sop=None, width=4):
         self.aclk   = aclk
         self.tdata  = tdata
@@ -20,7 +20,7 @@ class axis_if:
 # Axis Driver.
 #----------------------------------------------
 
-class axis_drv:
+class AxisDriver:
 
     def __init__(self, name, axis_if, width = 4):
         self.name = name
@@ -65,12 +65,12 @@ class axis_drv:
 # Axis monitor. 
 #----------------------------------------------
 
-class axis_mon:
+class AxisMonitor:
     def __init__(self, name, axis_if, aport, width = 4, corrupt = 0):
         self.name    = name
         self.width   = width
         self.aport   = aport
-        self.axis_if = axis_if        
+        self.axis_if  = axis_if        
         self.data    = []
         self.corrupt = corrupt
         
@@ -93,25 +93,30 @@ class axis_mon:
                         self.data[corr_word_pos] = self.data[corr_word_pos] ^ corr_data
                     pkt_mon = Packet(self.width)
                     pkt_mon.data = self.data.copy()
-                    # If TKEEP is not conencted then treat all
-                    # words as full
-                    if self.axis_if.tkeep is not None:
-                        pkt_mon.pkt_size = self.width*(len(self.data)-1) + countones(self.axis_if.tkeep.value)
-                    else:
-                        pkt_mon.pkt_size = self.width*(len(self.data))                
+                    # Pkt size calculation:
+                    pkt_mon.pkt_size = self.calc_pkt_size()                    
                     # Clear data
                     self.data = []
                     mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
                     pkt_mon.print_pkt(mon_str)
                     self.aport.append(pkt_mon)
                     pkt_cntr += 1
+
+    def calc_pkt_size(self):
+        # If TKEEP is not conencted then treat all
+        # words as full
+        if self.axis_if.tkeep is not None:
+            pkt_size = self.width*(len(self.data)-1) + countones(self.axis_if.tkeep.value)
+        else:
+            pkt_size = self.width*(len(self.data))
+        return pkt_size
                     
 
 #----------------------------------------------
 # Axis responder. Control TREADY signal.
 #----------------------------------------------
 
-class axis_rsp:
+class AxisResponder:
 
     def __init__(self, name, axis_if, behaviour = 'ALWAYS_READY'):
         self.name = name
@@ -144,5 +149,5 @@ class axis_rsp:
                 for cycle_num in range(0,5):
                     await RisingEdge(self.axis_if.aclk)
         else:
-            assert False, "[ERROR] axis_rsp behaviour is not set."
+            assert False, "[ERROR] AxisResponder behaviour is not set."
                                 
