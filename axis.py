@@ -66,15 +66,17 @@ class AxisDriver:
 #----------------------------------------------
 
 class AxisMonitor:
-    def __init__(self, name, axis_if, aport, width = 4, corrupt = 0):
+    def __init__(self, name, axis_if, aport, width = 4, corrupt = 0, tdata_unpack = 0):
         self.name    = name
         self.width   = width
         self.aport   = aport
         self.axis_if  = axis_if        
         self.data    = []
         self.corrupt = corrupt
+        self.tdata_unpack = tdata_unpack
         
     async def mon_if(self):
+        # Handle unpacked TDATA        
         pkt_cntr = 1
         while(True):
             await RisingEdge(self.axis_if.aclk)
@@ -83,7 +85,15 @@ class AxisMonitor:
             else:
                 tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
             if(tnx_completed):
-                self.data.append(self.axis_if.tdata.value.integer)
+                if(self.tdata_unpack):
+                    tdata_int = 0
+                    for i in range (len(self.axis_if.tdata.value)):
+                        tdata_int = tdata_int | (self.axis_if.tdata.value[i].integer << i*8)
+                        print(f"tdata.value[{i}] = {self.axis_if.tdata.value[i].integer}")
+                    print(f"tdata_int = {tdata_int} {type(tdata_int)}")
+                else:
+                    tdata_int = self.axis_if.tdata.value.integer
+                self.data.append(tdata_int)
                 if(self.axis_if.tlast.value == 1):
                     # Intentionally corrupt the packet                    
                     if(self.corrupt):
