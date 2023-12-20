@@ -22,10 +22,11 @@ class AxisIf:
 
 class AxisDriver:
 
-    def __init__(self, name, axis_if, width = 4):
+    def __init__(self, name, axis_if, width = 4, tdata_unpack = 0):
         self.name = name
         self.axis_if = axis_if
         self.width = width
+        self.tdata_unpack = tdata_unpack
 
     async def send_pkt(self, pkt):
         pkt.check_pkt()
@@ -48,7 +49,18 @@ class AxisDriver:
             #TLAST generation
             if(word_num == len(pkt.data)-1):
                 self.axis_if.tlast.value = 1
-            self.axis_if.tdata.value = pkt.data[word_num]
+            wr_data = pkt.data[word_num]
+            if(self.tdata_unpack):
+                wr_data_list = []
+                print(f"wr_data = {wr_data:x}")
+                for byte_indx in range(self.width):
+                    wr_data_list.append(wr_data  >> (byte_indx * 8) & 0xFF)
+                print(f"wr_data_list = {wr_data_list}")
+                wr_data_list.reverse()
+                print(f"wr_data_list = {wr_data_list}")                
+                self.axis_if.tdata.value = wr_data_list
+            else:
+                self.axis_if.tdata.value = wr_data
             self.axis_if.tvalid.value = 1
             await RisingEdge(self.axis_if.aclk)
             # If backpressure is enabled wait for TREADY to
@@ -87,10 +99,10 @@ class AxisMonitor:
             if(tnx_completed):
                 if(self.tdata_unpack):
                     tdata_int = 0
-                    for i in range (len(self.axis_if.tdata.value)):
-                        tdata_int = tdata_int | (self.axis_if.tdata.value[i].integer << i*8)
-                        print(f"tdata.value[{i}] = {self.axis_if.tdata.value[i].integer}")
-                    print(f"tdata_int = {tdata_int} {type(tdata_int)}")
+                    indx = 0
+                    for item in reversed(self.axis_if.tdata.value):                        
+                        tdata_int = tdata_int | (item << indx*8)
+                        indx += 1
                 else:
                     tdata_int = self.axis_if.tdata.value.integer
                 self.data.append(tdata_int)
