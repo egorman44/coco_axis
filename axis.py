@@ -2,10 +2,11 @@ import random
 import cocotb
 from coco_env.packet import Packet
 from coco_env.bin_operation import countones
+from coco_env.bin_operation import check_pos
 from cocotb.triggers import RisingEdge
 
 class AxisIf:
-    def __init__(self, aclk, tdata, tvalid, tlast, tkeep=None, tuser=None, tready=None, sop=None, width=4):
+    def __init__(self, aclk, tdata, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, sop=None, width=4):
         self.aclk   = aclk
         self.tdata  = tdata
         self.tvalid = tvalid
@@ -42,26 +43,25 @@ class AxisDriver:
                     self.axis_if.sop.value = 0
             #TKEEP generation
             if self.axis_if.tkeep is not None:
-                if(word_num == len(pkt.data)-1):
+                if word_num == len(pkt.data)-1 and pkt.pkt_size % self.width != 0:
                     self.axis_if.tkeep.value = (1 << (pkt.pkt_size % self.width))-1
                 else:
                     self.axis_if.tkeep.value = (1 << (self.width))-1
             #TLAST generation
-            if(word_num == len(pkt.data)-1):
-                self.axis_if.tlast.value = 1
+            if(self.axis_if.tlast is not None):
+                if(word_num == len(pkt.data)-1):
+                    self.axis_if.tlast.value = 1
             wr_data = pkt.data[word_num]
             if(self.tdata_unpack):
                 wr_data_list = []
-                print(f"wr_data = {wr_data:x}")
                 for byte_indx in range(self.width):
                     wr_data_list.append(wr_data  >> (byte_indx * 8) & 0xFF)
-                print(f"wr_data_list = {wr_data_list}")
                 wr_data_list.reverse()
-                print(f"wr_data_list = {wr_data_list}")                
                 self.axis_if.tdata.value = wr_data_list
             else:
                 self.axis_if.tdata.value = wr_data
-            self.axis_if.tvalid.value = 1
+            if self.axis_if.tvalid is not None:
+                self.axis_if.tvalid.value = 1
             await RisingEdge(self.axis_if.aclk)
             # If backpressure is enabled wait for TREADY to
             # send the next word.
@@ -70,21 +70,22 @@ class AxisDriver:
                     word_num += 1
             else:
                 word_num += 1
-        self.axis_if.tvalid.value = 0
-        self.axis_if.tlast.value = 0
+        if self.axis_if.tvalid is not None:
+            self.axis_if.tvalid.value = 0
+        if self.axis_if.tlast is not None:
+            self.axis_if.tlast.value = 0
 
 #----------------------------------------------
 # Axis monitor. 
 #----------------------------------------------
 
 class AxisMonitor:
-    def __init__(self, name, axis_if, aport, width = 4, corrupt = 0, tdata_unpack = 0):
+    def __init__(self, name, axis_if, aport, width = 4, tdata_unpack = 0):
         self.name    = name
         self.width   = width
         self.aport   = aport
         self.axis_if  = axis_if        
         self.data    = []
-        self.corrupt = corrupt
         self.tdata_unpack = tdata_unpack
         
     async def mon_if(self):
@@ -103,17 +104,19 @@ class AxisMonitor:
                     for item in reversed(self.axis_if.tdata.value):                        
                         tdata_int = tdata_int | (item << indx*8)
                         indx += 1
-                else:
+                else:                    
                     tdata_int = self.axis_if.tdata.value.integer
-                self.data.append(tdata_int)
+                # Tkeep handle
+                tkeep_int = 0
+                for byte_indx in range(0, self.width):
+                    if check_pos(self.axis_if.tkeep.value, byte_indx):
+                        tkeep_int |= 0xFF << (8 * byte_indx)
+                tkeep_int = int(bin(tkeep_int)[:1:-1], 2)
+
+                # Append only valid data
+                self.data.append(tdata_int & tkeep_int)
                 if(self.axis_if.tlast.value == 1):
-                    # Intentionally corrupt the packet                    
-                    if(self.corrupt):
-                        corr_word_pos   = random.randint(0,len(self.data))
-                        corr_bit_pos    = random.randint(0,self.width*8)
-                        corr_data       = 1 << corr_bit_pos
-                        self.data[corr_word_pos] = self.data[corr_word_pos] ^ corr_data
-                    pkt_mon = Packet(self.width)
+                    pkt_mon = Packet(self.name, self.width)
                     pkt_mon.data = self.data.copy()
                     # Pkt size calculation:
                     pkt_mon.pkt_size = self.calc_pkt_size()                    
@@ -124,6 +127,7 @@ class AxisMonitor:
                     self.aport.append(pkt_mon)
                     pkt_cntr += 1
 
+    # TODO: transaction could be not full not only in the last word
     def calc_pkt_size(self):
         # If TKEEP is not conencted then treat all
         # words as full
