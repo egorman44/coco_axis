@@ -91,6 +91,7 @@ class AxisMonitor:
     async def mon_if(self):
         # Handle unpacked TDATA        
         pkt_cntr = 1
+        pkt_size = 0
         while(True):
             await RisingEdge(self.axis_if.aclk)
             if(self.axis_if.tready is None):
@@ -106,36 +107,41 @@ class AxisMonitor:
                         indx += 1
                 else:                    
                     tdata_int = self.axis_if.tdata.value.integer
+                #####################
                 # Tkeep handle
-                tkeep_int = 0
-                for byte_indx in range(0, self.width):
-                    if check_pos(self.axis_if.tkeep.value, byte_indx):
-                        tkeep_int |= 0xFF << (8 * byte_indx)
-                tkeep_int = int(bin(tkeep_int)[:1:-1], 2)
+                # 1. Filter valid bytes only
+                # 2. Accumulate the packet size
+                #####################
+                if self.axis_if.tkeep is not None:
+                    tkeep_int = 0
+                    pkt_size += countones(self.axis_if.tkeep.value)
+                    for byte_indx in range(0, self.width):
+                        if check_pos(self.axis_if.tkeep.value, byte_indx):
+                            tkeep_int |= 0xFF << (8 * byte_indx)
+                    tkeep_int = int(bin(tkeep_int)[:1:-1], 2)
+                else:
+                    tkeep_int = (2 ** self.width)-1
+                    if(self.axis_if.tlast.value == 1):
+                        # +1 since current word is still in process
+                        pkt_size = self.width*(len(self.data)+1)                
 
                 # Append only valid data
                 self.data.append(tdata_int & tkeep_int)
+                
+                #####################
+                # Last cycle
+                #####################
                 if(self.axis_if.tlast.value == 1):
                     pkt_mon = Packet(self.name, self.width)
                     pkt_mon.data = self.data.copy()
                     # Pkt size calculation:
-                    pkt_mon.pkt_size = self.calc_pkt_size()                    
+                    pkt_mon.pkt_size = pkt_size
                     # Clear data
                     self.data = []
                     mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
                     pkt_mon.print_pkt(mon_str)
                     self.aport.append(pkt_mon)
                     pkt_cntr += 1
-
-    # TODO: transaction could be not full not only in the last word
-    def calc_pkt_size(self):
-        # If TKEEP is not conencted then treat all
-        # words as full
-        if self.axis_if.tkeep is not None:
-            pkt_size = self.width*(len(self.data)-1) + countones(self.axis_if.tkeep.value)
-        else:
-            pkt_size = self.width*(len(self.data))
-        return pkt_size
                     
 
 #----------------------------------------------
