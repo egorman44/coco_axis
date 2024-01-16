@@ -23,11 +23,12 @@ class AxisIf:
 
 class AxisDriver:
 
-    def __init__(self, name, axis_if, width = 4, tdata_unpack = 0):
-        self.name = name
-        self.axis_if = axis_if
-        self.width = width
+    def __init__(self, name, axis_if, width = 4, tdata_unpack = 0, msb_first = 0):
+        self.name         = name
+        self.axis_if      = axis_if
+        self.width        = width
         self.tdata_unpack = tdata_unpack
+        self.msb_first    = msb_first
 
     async def send_pkt(self, pkt):
         pkt.check_pkt()
@@ -41,25 +42,46 @@ class AxisDriver:
                     self.axis_if.sop.value = 1
                 else:
                     self.axis_if.sop.value = 0
-            #TKEEP generation
+            #####################
+            # TKEEP
+            #####################
             if self.axis_if.tkeep is not None:
                 if word_num == len(pkt.data)-1 and pkt.pkt_size % self.width != 0:
-                    self.axis_if.tkeep.value = (1 << (pkt.pkt_size % self.width))-1
+                    tkeep = (1 << (pkt.pkt_size % self.width))-1
                 else:
+                    tkeep = (1 << (self.width))-1
                     self.axis_if.tkeep.value = (1 << (self.width))-1
-            #TLAST generation
+                if(self.msb_first):
+                    tkeep = int(f"{tkeep:0{self.width}b}"[::-1],2)
+                self.axis_if.tkeep.value = tkeep
+            #####################
+            # TLAST
+            #####################
             if(self.axis_if.tlast is not None):
                 if(word_num == len(pkt.data)-1):
                     self.axis_if.tlast.value = 1
+            #####################
+            # TDATA
+            #####################
             wr_data = pkt.data[word_num]
             if(self.tdata_unpack):
                 wr_data_list = []
                 for byte_indx in range(self.width):
                     wr_data_list.append(wr_data  >> (byte_indx * 8) & 0xFF)
-                wr_data_list.reverse()
+                if(self.msb_first == 0):
+                    wr_data_list.reverse()
                 self.axis_if.tdata.value = wr_data_list
             else:
+                if(self.msb_first):
+                    wr_data_rev = 0
+                    for byte_indx in range(self.width):
+                        wr_data_rev |= (wr_data  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
+                    self.axis_if.tdata.value = wr_data_rev
+                wr_data = wr_data_rev
                 self.axis_if.tdata.value = wr_data
+            #####################
+            # TVALID
+            #####################
             if self.axis_if.tvalid is not None:
                 self.axis_if.tvalid.value = 1
             await RisingEdge(self.axis_if.aclk)
@@ -80,13 +102,14 @@ class AxisDriver:
 #----------------------------------------------
 
 class AxisMonitor:
-    def __init__(self, name, axis_if, aport, width = 4, tdata_unpack = 0):
+    def __init__(self, name, axis_if, aport, width = 4, tdata_unpack = 0, msb_first=0):
         self.name    = name
         self.width   = width
         self.aport   = aport
         self.axis_if  = axis_if        
         self.data    = []
         self.tdata_unpack = tdata_unpack
+        self.msb_first = msb_first
         
     async def mon_if(self):
         # Handle unpacked TDATA        
@@ -102,11 +125,19 @@ class AxisMonitor:
                 if(self.tdata_unpack):
                     tdata_int = 0
                     indx = 0
-                    for item in reversed(self.axis_if.tdata.value):                        
-                        tdata_int = tdata_int | (item << indx*8)
+                    if(self.msb_first):
+                        byte_range = range(self.width)
+                    else:
+                        byte_range = range(self.width)[::-1]
+                    for byte_indx in byte_range:
+                        tdata_int = tdata_int | (self.axis_if.tdata.value[byte_indx] << indx*8)
                         indx += 1
                 else:                    
                     tdata_int = self.axis_if.tdata.value.integer
+                    tdata_rev = 0
+                    for byte_indx in range(self.width):
+                        tdata_rev |= (tdata_int  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
+                    tdata_int = tdata_rev
                 #####################
                 # Tkeep handle
                 # 1. Filter valid bytes only
