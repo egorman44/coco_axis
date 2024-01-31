@@ -6,14 +6,13 @@ from coco_env.bin_operation import check_pos
 from cocotb.triggers import RisingEdge
 
 class AxisIf:
-    def __init__(self, aclk, tdata, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, sop=None, width=4):
+    def __init__(self, aclk, tdata, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, width=4):
         self.aclk   = aclk
         self.tdata  = tdata
         self.tvalid = tvalid
         self.tkeep  = tkeep
         self.tlast  = tlast
         self.tuser  = tuser
-        self.sop    = sop
         self.tready = tready
         self.width  = width
         
@@ -23,25 +22,22 @@ class AxisIf:
 
 class AxisDriver:
 
-    def __init__(self, name, axis_if, width = 4, tdata_unpack = 0, msb_first = 0):
+    def __init__(self, name, axis_if, width = 4, tdata_unpack = 0, msb_first = 0, flow_ctrl='always_on'):
         self.name         = name
         self.axis_if      = axis_if
         self.width        = width
         self.tdata_unpack = tdata_unpack
         self.msb_first    = msb_first
+        self.flow_ctrl    = flow_ctrl
 
     async def send_pkt(self, pkt):
         pkt.check_pkt()
+        tvalid_state = 1
+        tvalid_val = 0
         for x in range(pkt.delay):
             await RisingEdge(self.axis_if.aclk)
         word_num = 0
         while word_num < len(pkt.data):
-            #SOP generation
-            if self.axis_if.sop is not None:
-                if(word_num == 0):
-                    self.axis_if.sop.value = 1
-                else:
-                    self.axis_if.sop.value = 0
             #####################
             # TKEEP
             #####################
@@ -77,25 +73,49 @@ class AxisDriver:
                     for byte_indx in range(self.width):
                         wr_data_rev |= (wr_data  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
                     self.axis_if.tdata.value = wr_data_rev
-                wr_data = wr_data_rev
+                    wr_data = wr_data_rev
                 self.axis_if.tdata.value = wr_data
             #####################
             # TVALID
             #####################
             if self.axis_if.tvalid is not None:
-                self.axis_if.tvalid.value = 1
+                if(self.flow_ctrl ==  'one_valid_one_nonvalid'):
+                    if tvalid_state:
+                        tvalid_state = 0
+                    else:
+                        tvalid_state = 1
+                    self.axis_if.tvalid.value = tvalid_state
+                elif(self.flow_ctrl == 'one_valid_some_nonvalid'):
+                    if tvalid_state:
+                        tvalid_val = 1                        
+                        tvalid_delay = random.randint(1,5)
+                        tvalid_state = 0
+                    else:
+                        tvalid_val = 0
+                        if tvalid_delay:
+                            tvalid_delay -= 1
+                        else:
+                            tvalid_state = 1
+                    self.axis_if.tvalid.value = tvalid_val                        
+                else:
+                    self.axis_if.tvalid.value = 1
+
+            #####################
+            # TRANSACTION COMPLETION
+            #####################
             await RisingEdge(self.axis_if.aclk)
-            # If backpressure is enabled wait for TREADY to
-            # send the next word.
-            if(self.axis_if.tready is not None):
-                if(self.axis_if.tready.value == 1):
-                    word_num += 1
+            if(self.axis_if.tready is None):
+                tnx_completed = self.axis_if.tvalid.value
             else:
-                word_num += 1
+                tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
+            if(tnx_completed):
+                word_num += 1                
+            
         if self.axis_if.tvalid is not None:
             self.axis_if.tvalid.value = 0
         if self.axis_if.tlast is not None:
             self.axis_if.tlast.value = 0
+        tvalid_state = 1
 
 #----------------------------------------------
 # Axis monitor. 
@@ -113,7 +133,7 @@ class AxisMonitor:
         
     async def mon_if(self):
         # Handle unpacked TDATA        
-        pkt_cntr = 1
+        pkt_cntr = 0
         pkt_size = 0
         while(True):
             await RisingEdge(self.axis_if.aclk)
@@ -129,6 +149,7 @@ class AxisMonitor:
                         byte_range = range(self.width)
                     else:
                         byte_range = range(self.width)[::-1]
+                    # TODO: add non-byte word.
                     for byte_indx in byte_range:
                         tdata_int = tdata_int | (self.axis_if.tdata.value[byte_indx] << indx*8)
                         indx += 1
@@ -146,6 +167,7 @@ class AxisMonitor:
                 if self.axis_if.tkeep is not None:
                     tkeep_int = 0
                     pkt_size += countones(self.axis_if.tkeep.value)
+                    print(f"pkt_size = {pkt_size}")
                     for byte_indx in range(0, self.width):
                         if check_pos(self.axis_if.tkeep.value, byte_indx):
                             tkeep_int |= 0xFF << (8 * byte_indx)
@@ -163,12 +185,13 @@ class AxisMonitor:
                 # Last cycle
                 #####################
                 if(self.axis_if.tlast.value == 1):
-                    pkt_mon = Packet(self.name, self.width)
+                    pkt_mon = Packet(f"{self.name}{pkt_cntr}", self.width)
                     pkt_mon.data = self.data.copy()
                     # Pkt size calculation:
                     pkt_mon.pkt_size = pkt_size
                     # Clear data
                     self.data = []
+                    pkt_size = 0
                     mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
                     pkt_mon.print_pkt(mon_str)
                     self.aport.append(pkt_mon)
