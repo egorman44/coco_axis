@@ -1,5 +1,6 @@
 import random
 import cocotb
+import math
 from coco_env.packet import Packet
 from coco_env.bin_operation import countones
 from coco_env.bin_operation import check_pos
@@ -20,29 +21,33 @@ class AxisIf:
 # Axis Driver.
 #----------------------------------------------
 
+# TODO: get width out of axis_if
+
 class AxisDriver:
 
-    def __init__(self, name, axis_if, width = 4, tdata_unpack = 0, msb_first = 0, flow_ctrl='always_on'):
+    def __init__(self, name, axis_if, tdata_unpack = 0, msb_first = 0, flow_ctrl='always_on'):
         self.name         = name
         self.axis_if      = axis_if
-        self.width        = width
+        self.width        = axis_if.width
         self.tdata_unpack = tdata_unpack
         self.msb_first    = msb_first
         self.flow_ctrl    = flow_ctrl
 
     async def send_pkt(self, pkt):
         pkt.check_pkt()
+        word_list = pkt.get_word_list(self.width)
         tvalid_state = 1
         tvalid_val = 0
         for x in range(pkt.delay):
             await RisingEdge(self.axis_if.aclk)
         word_num = 0
-        while word_num < len(pkt.data):
+        pkt_len_in_words = math.ceil(pkt.pkt_size/self.width)
+        while word_num < pkt_len_in_words:
             #####################
             # TKEEP
             #####################
             if self.axis_if.tkeep is not None:
-                if word_num == len(pkt.data)-1 and pkt.pkt_size % self.width != 0:
+                if word_num == pkt_len_in_words-1 and pkt.pkt_size % self.width != 0:
                     tkeep = (1 << (pkt.pkt_size % self.width))-1
                 else:
                     tkeep = (1 << (self.width))-1
@@ -54,12 +59,12 @@ class AxisDriver:
             # TLAST
             #####################
             if(self.axis_if.tlast is not None):
-                if(word_num == len(pkt.data)-1):
+                if(word_num == pkt_len_in_words-1):
                     self.axis_if.tlast.value = 1
             #####################
             # TDATA
             #####################
-            wr_data = pkt.data[word_num]
+            wr_data = word_list[word_num]
             if(self.tdata_unpack):
                 wr_data_list = []
                 for byte_indx in range(self.width):
@@ -124,9 +129,9 @@ class AxisDriver:
 class AxisMonitor:
     def __init__(self, name, axis_if, aport, width = 4, tdata_unpack = 0, msb_first=0):
         self.name    = name
-        self.width   = width
         self.aport   = aport
-        self.axis_if  = axis_if        
+        self.axis_if  = axis_if
+        self.width   = axis_if.width        
         self.data    = []
         self.tdata_unpack = tdata_unpack
         self.msb_first = msb_first
@@ -149,10 +154,10 @@ class AxisMonitor:
                         byte_range = range(self.width)
                     else:
                         byte_range = range(self.width)[::-1]
-                    # TODO: add non-byte word.
+                    # TODO: add non-byte word. Do we need it ?! 
                     for byte_indx in byte_range:
                         tdata_int = tdata_int | (self.axis_if.tdata.value[byte_indx] << indx*8)
-                        indx += 1
+                        indx += 1                        
                 else:                    
                     tdata_int = self.axis_if.tdata.value.integer
                     tdata_rev = 0
@@ -167,7 +172,6 @@ class AxisMonitor:
                 if self.axis_if.tkeep is not None:
                     tkeep_int = 0
                     pkt_size += countones(self.axis_if.tkeep.value)
-                    print(f"pkt_size = {pkt_size}")
                     for byte_indx in range(0, self.width):
                         if check_pos(self.axis_if.tkeep.value, byte_indx):
                             tkeep_int |= 0xFF << (8 * byte_indx)
@@ -185,10 +189,10 @@ class AxisMonitor:
                 # Last cycle
                 #####################
                 if(self.axis_if.tlast.value == 1):
-                    pkt_mon = Packet(f"{self.name}{pkt_cntr}", self.width)
-                    pkt_mon.data = self.data.copy()
+                    pkt_mon = Packet(f"{self.name}{pkt_cntr}")
+                    pkt_mon.write_word_list(self.data, pkt_size, self.width)
                     # Pkt size calculation:
-                    pkt_mon.pkt_size = pkt_size
+                    
                     # Clear data
                     self.data = []
                     pkt_size = 0
