@@ -1,3 +1,4 @@
+# TODO check the type of tdata to define it's type and get rid off tdata_unpack
 import random
 import cocotb
 import math
@@ -7,7 +8,7 @@ from coco_env.bin_operation import check_pos
 from cocotb.triggers import RisingEdge
 
 class AxisIf:
-    def __init__(self, aclk, tdata, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, width=4):
+    def __init__(self, aclk, tdata, width, unpack, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None):
         self.aclk   = aclk
         self.tdata  = tdata
         self.tvalid = tvalid
@@ -16,6 +17,7 @@ class AxisIf:
         self.tuser  = tuser
         self.tready = tready
         self.width  = width
+        self.unpack = unpack
         
 #----------------------------------------------
 # Axis Driver.
@@ -25,19 +27,20 @@ class AxisIf:
 
 class AxisDriver:
 
-    def __init__(self, name, axis_if, tdata_unpack = 0, msb_first = 0, flow_ctrl='always_on'):
-        self.name         = name
-        self.axis_if      = axis_if
-        self.width        = axis_if.width
-        self.tdata_unpack = tdata_unpack
-        self.msb_first    = msb_first
-        self.flow_ctrl    = flow_ctrl
+    def __init__(self, name, axis_if, msb_first = 0, flow_ctrl='always_on'):
+        self.name      = name
+        self.axis_if   = axis_if
+        self.width     = axis_if.width
+        self.unpack    = axis_if.unpack
+        self.msb_first = msb_first
+        self.flow_ctrl = flow_ctrl
 
     async def send_pkt(self, pkt):
         pkt.check_pkt()
         word_list = pkt.get_word_list(self.width)
         tvalid_state = 1
-        tvalid_val = 0
+        tvalid_val = 1
+        tvalid_delay = random.randint(1,5)
         for x in range(pkt.delay):
             await RisingEdge(self.axis_if.aclk)
         word_num = 0
@@ -65,7 +68,7 @@ class AxisDriver:
             # TDATA
             #####################
             wr_data = word_list[word_num]
-            if(self.tdata_unpack):
+            if(self.unpack):
                 wr_data_list = []
                 for byte_indx in range(self.width):
                     wr_data_list.append(wr_data  >> (byte_indx * 8) & 0xFF)
@@ -84,6 +87,8 @@ class AxisDriver:
             # TVALID
             #####################
             if self.axis_if.tvalid is not None:
+                if(self.flow_ctrl == 'flow_en'):
+                    self.flow_ctrl = random.choice(['one_valid_one_nonvalid', 'one_valid_some_nonvalid', 'some_valid_some_nonvalid'])
                 if(self.flow_ctrl ==  'one_valid_one_nonvalid'):
                     if tvalid_state:
                         tvalid_state = 0
@@ -101,7 +106,15 @@ class AxisDriver:
                             tvalid_delay -= 1
                         else:
                             tvalid_state = 1
-                    self.axis_if.tvalid.value = tvalid_val                        
+                    self.axis_if.tvalid.value = tvalid_val
+                elif(self.flow_ctrl == 'some_valid_some_nonvalid'):
+                    if tvalid_delay:
+                        tvalid_delay -= 1
+                    else:
+                        tvalid_delay = random.randint(1,5)
+                        tvalid_val = tvalid_val ^ 1
+                    self.axis_if.tvalid.value = tvalid_val
+
                 else:
                     self.axis_if.tvalid.value = 1
 
@@ -127,13 +140,13 @@ class AxisDriver:
 #----------------------------------------------
 
 class AxisMonitor:
-    def __init__(self, name, axis_if, aport, width = 4, tdata_unpack = 0, msb_first=0):
-        self.name    = name
-        self.aport   = aport
-        self.axis_if  = axis_if
-        self.width   = axis_if.width        
-        self.data    = []
-        self.tdata_unpack = tdata_unpack
+    def __init__(self, name, axis_if, aport=None, msb_first=0):
+        self.name      = name
+        self.aport     = aport
+        self.axis_if   = axis_if
+        self.width     = axis_if.width        
+        self.data      = []
+        self.unpack    = axis_if.unpack
         self.msb_first = msb_first
         
     async def mon_if(self):
@@ -147,7 +160,8 @@ class AxisMonitor:
             else:
                 tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
             if(tnx_completed):
-                if(self.tdata_unpack):
+                print(f"tdata = {self.axis_if.tdata.value}")
+                if(self.unpack):
                     tdata_int = 0
                     indx = 0
                     if(self.msb_first):
@@ -160,10 +174,16 @@ class AxisMonitor:
                         indx += 1                        
                 else:                    
                     tdata_int = self.axis_if.tdata.value.integer
-                    tdata_rev = 0
-                    for byte_indx in range(self.width):
-                        tdata_rev |= (tdata_int  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
+                    print(f"tdata_int = {tdata_int:x}")                    
+                    if(self.width > 1):
+                        tdata_rev = 0
+                        for byte_indx in range(self.width):
+                            tdata_rev |= (tdata_int  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
+                    else:
+                        print("Here")
+                        tdata_rev = tdata_int                    
                     tdata_int = tdata_rev
+                    print(f"tdata_int2 = {tdata_int:x}")                    
                 #####################
                 # Tkeep handle
                 # 1. Filter valid bytes only
@@ -177,10 +197,11 @@ class AxisMonitor:
                             tkeep_int |= 0xFF << (8 * byte_indx)
                     tkeep_int = int(bin(tkeep_int)[:1:-1], 2)
                 else:
-                    tkeep_int = (2 ** self.width)-1
-                    if(self.axis_if.tlast.value == 1):
-                        # +1 since current word is still in process
-                        pkt_size = self.width*(len(self.data)+1)                
+                    tkeep_int = (2 ** (8*self.width))-1
+                    if self.axis_if.tlast is not None:
+                        if(self.axis_if.tlast.value == 1):
+                            # +1 since current word is still in process
+                            pkt_size = self.width*(len(self.data)+1)                
 
                 # Append only valid data
                 self.data.append(tdata_int & tkeep_int)
@@ -188,18 +209,18 @@ class AxisMonitor:
                 #####################
                 # Last cycle
                 #####################
-                if(self.axis_if.tlast.value == 1):
-                    pkt_mon = Packet(f"{self.name}{pkt_cntr}")
-                    pkt_mon.write_word_list(self.data, pkt_size, self.width)
-                    # Pkt size calculation:
-                    
-                    # Clear data
-                    self.data = []
-                    pkt_size = 0
-                    mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
-                    pkt_mon.print_pkt(mon_str)
-                    self.aport.append(pkt_mon)
-                    pkt_cntr += 1
+                if self.axis_if.tlast is not None:
+                    print(f"tlast_type={type(self.axis_if.tlast)}")
+                    if self.axis_if.tlast.value == 1:
+                        pkt_mon = Packet(f"{self.name}{pkt_cntr}")
+                        pkt_mon.write_word_list(self.data, pkt_size, self.width)                       
+                        # Clear data
+                        self.data = []
+                        pkt_size = 0
+                        mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
+                        pkt_mon.print_pkt(mon_str)
+                        self.aport.append(pkt_mon)
+                        pkt_cntr += 1
                     
 
 #----------------------------------------------
