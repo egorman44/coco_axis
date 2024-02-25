@@ -6,9 +6,9 @@ from coco_env.packet import Packet
 from coco_env.bin_operation import countones
 from coco_env.bin_operation import check_pos
 from cocotb.triggers import RisingEdge
-
+from cocotb.utils import get_sim_time
 class AxisIf:
-    def __init__(self, aclk, tdata, width, unpack, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None):
+    def __init__(self, aclk, tdata, width, unpack, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, tkeep_type='packed'):
         self.aclk   = aclk
         self.tdata  = tdata
         self.tvalid = tvalid
@@ -18,6 +18,7 @@ class AxisIf:
         self.tready = tready
         self.width  = width
         self.unpack = unpack
+        self.tkeep_type = tkeep_type
         
 #----------------------------------------------
 # Axis Driver.
@@ -68,14 +69,14 @@ class AxisDriver:
             # TDATA
             #####################
             wr_data = word_list[word_num]
-            if(self.unpack):
+            if(self.unpack == 'unpacked'):
                 wr_data_list = []
                 for byte_indx in range(self.width):
                     wr_data_list.append(wr_data  >> (byte_indx * 8) & 0xFF)
                 if(self.msb_first == 0):
                     wr_data_list.reverse()
                 self.axis_if.tdata.value = wr_data_list
-            else:
+            elif(self.unpack == 'packed'):
                 if(self.msb_first):
                     wr_data_rev = 0
                     for byte_indx in range(self.width):
@@ -83,6 +84,8 @@ class AxisDriver:
                     self.axis_if.tdata.value = wr_data_rev
                     wr_data = wr_data_rev
                 self.axis_if.tdata.value = wr_data
+            else:
+                assert False , f"[BAD_CONFIG] AXIS driver tdata in wrong format"
             #####################
             # TVALID
             #####################
@@ -140,7 +143,7 @@ class AxisDriver:
 #----------------------------------------------
 
 class AxisMonitor:
-    def __init__(self, name, axis_if, aport=None, msb_first=0):
+    def __init__(self, name, axis_if, aport=None, msb_first=0, static_pkt=None):
         self.name      = name
         self.aport     = aport
         self.axis_if   = axis_if
@@ -148,11 +151,13 @@ class AxisMonitor:
         self.data      = []
         self.unpack    = axis_if.unpack
         self.msb_first = msb_first
+        self.static_pkt = static_pkt
+        self.pkt_size = 0
+        self.pkt_cntr = 0
         
     async def mon_if(self):
         # Handle unpacked TDATA        
-        pkt_cntr = 0
-        pkt_size = 0
+        
         while(True):
             await RisingEdge(self.axis_if.aclk)
             if(self.axis_if.tready is None):
@@ -160,8 +165,7 @@ class AxisMonitor:
             else:
                 tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
             if(tnx_completed):
-                print(f"tdata = {self.axis_if.tdata.value}")
-                if(self.unpack):
+                if(self.unpack == 'unpacked'):
                     tdata_int = 0
                     indx = 0
                     if(self.msb_first):
@@ -172,37 +176,48 @@ class AxisMonitor:
                     for byte_indx in byte_range:
                         tdata_int = tdata_int | (self.axis_if.tdata.value[byte_indx] << indx*8)
                         indx += 1                        
-                else:                    
+                elif(self.unpack == 'packed'):                    
                     tdata_int = self.axis_if.tdata.value.integer
-                    print(f"tdata_int = {tdata_int:x}")                    
                     if(self.width > 1):
                         tdata_rev = 0
                         for byte_indx in range(self.width):
                             tdata_rev |= (tdata_int  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
                     else:
-                        print("Here")
                         tdata_rev = tdata_int                    
                     tdata_int = tdata_rev
-                    print(f"tdata_int2 = {tdata_int:x}")                    
+                elif(self.unpack == 'chisel_vec'):
+                    tdata_int = 0
+                    indx = 0
+                    byte_range = range(self.width)
+                    # TODO: add non-byte word. Do we need it ?! 
+                    for byte_indx in byte_range:
+                        tdata_int = tdata_int | (self.axis_if.tdata[byte_indx].value << indx*8)
+                        indx += 1
+                else:
+                    assert False , f"[BAD_CONFIG] AXIS monitor tdata in wrong format"
                 #####################
                 # Tkeep handle
                 # 1. Filter valid bytes only
                 # 2. Accumulate the packet size
                 #####################
                 if self.axis_if.tkeep is not None:
+                    if(self.axis_if.tkeep_type == 'packed'):
+                        tkeep_int_val = self.axis_if.tkeep.value
+                    elif(self.axis_if.tkeep_type == 'chisel_vec'):
+                        tkeep_int_val = 0
+                        for i in range(len(self.axis_if.tkeep)):
+                            tkeep_int_val |= self.axis_if.tkeep[i].value << i
+                    print(f"tkeep_int_val={tkeep_int_val}")
                     tkeep_int = 0
-                    pkt_size += countones(self.axis_if.tkeep.value)
+                    self.pkt_size += countones(tkeep_int_val)
                     for byte_indx in range(0, self.width):
-                        if check_pos(self.axis_if.tkeep.value, byte_indx):
+                        if check_pos(tkeep_int_val, byte_indx):
                             tkeep_int |= 0xFF << (8 * byte_indx)
-                    tkeep_int = int(bin(tkeep_int)[:1:-1], 2)
+                        tkeep_int = int(bin(tkeep_int)[:1:-1], 2)                        
                 else:
                     tkeep_int = (2 ** (8*self.width))-1
-                    if self.axis_if.tlast is not None:
-                        if(self.axis_if.tlast.value == 1):
-                            # +1 since current word is still in process
-                            pkt_size = self.width*(len(self.data)+1)                
-
+                    self.pkt_size += self.width
+                    
                 # Append only valid data
                 self.data.append(tdata_int & tkeep_int)
                 
@@ -210,18 +225,30 @@ class AxisMonitor:
                 # Last cycle
                 #####################
                 if self.axis_if.tlast is not None:
-                    print(f"tlast_type={type(self.axis_if.tlast)}")
                     if self.axis_if.tlast.value == 1:
-                        pkt_mon = Packet(f"{self.name}{pkt_cntr}")
-                        pkt_mon.write_word_list(self.data, pkt_size, self.width)                       
-                        # Clear data
-                        self.data = []
-                        pkt_size = 0
-                        mon_str = f"[{self.name}] PACKET[{pkt_cntr}] INFO: \n"
-                        pkt_mon.print_pkt(mon_str)
-                        self.aport.append(pkt_mon)
-                        pkt_cntr += 1
-                    
+                        self.write_aport()
+                else:
+                    if self.static_pkt is not None:
+                        if self.static_pkt <= self.pkt_size:
+                            self.write_aport()
+
+
+            #####################
+            # send packet 
+            #####################
+    def write_aport(self):
+        pkt_mon = Packet(f"{self.name}-{self.pkt_cntr}")
+        pkt_mon.write_word_list(self.data, self.pkt_size, self.width)                       
+        # Clear data
+        self.data = []
+        self.pkt_size = 0
+        mon_str = f"[{self.name}] PACKET[{self.pkt_cntr}] INFO: \n"
+        pkt_mon.print_pkt(mon_str)
+        time_ns = get_sim_time(units='ns')
+        print(f"time= {time_ns}")
+        self.aport.append(pkt_mon)
+        self.pkt_cntr += 1
+        
 
 #----------------------------------------------
 # Axis responder. Control TREADY signal.
