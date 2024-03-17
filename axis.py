@@ -19,7 +19,7 @@ class AxisIf:
         self.width  = width
         self.unpack = unpack
         self.tkeep_type = tkeep_type
-        
+        print(f"unpack = {self.unpack}")
 #----------------------------------------------
 # Axis Driver.
 #----------------------------------------------
@@ -47,11 +47,21 @@ class AxisDriver:
         word_num = 0
         pkt_len_in_words = math.ceil(pkt.pkt_size/self.width)
         while word_num < pkt_len_in_words:
+            if(word_num == pkt_len_in_words-1):
+                last_word = 1
+            else:
+                last_word = 0
+            #####################
+            # TLAST
+            #####################
+            if(self.axis_if.tlast is not None):
+                if(last_word):
+                    self.axis_if.tlast.value = 1            
             #####################
             # TKEEP
             #####################
             if self.axis_if.tkeep is not None:
-                if word_num == pkt_len_in_words-1 and pkt.pkt_size % self.width != 0:
+                if last_word and pkt.pkt_size % self.width != 0:
                     tkeep = (1 << (pkt.pkt_size % self.width))-1
                 else:
                     tkeep = (1 << (self.width))-1
@@ -60,30 +70,28 @@ class AxisDriver:
                     tkeep = int(f"{tkeep:0{self.width}b}"[::-1],2)
                 self.axis_if.tkeep.value = tkeep
             #####################
-            # TLAST
-            #####################
-            if(self.axis_if.tlast is not None):
-                if(word_num == pkt_len_in_words-1):
-                    self.axis_if.tlast.value = 1
-            #####################
             # TDATA
             #####################
-            wr_data = word_list[word_num]
+            # TODO: check that Endianess is matched for all combinations
+            # Prepare data. Put it into the list
+            data_list = [0] * self.width
+            if(last_word):
+                data_list = pkt.data[self.width*word_num:]
+            else:
+                data_list = pkt.data[self.width*word_num:self.width*(word_num+1)-1]
+            if self.msb_first == 1:
+                data_list.reverse()
+            # Write data into IF in depends on the interface type
             if(self.unpack == 'unpacked'):
-                wr_data_list = []
-                for byte_indx in range(self.width):
-                    wr_data_list.append(wr_data  >> (byte_indx * 8) & 0xFF)
-                if(self.msb_first == 0):
-                    wr_data_list.reverse()
-                self.axis_if.tdata.value = wr_data_list
+                self.axis_if.tdata.value = data_list
             elif(self.unpack == 'packed'):
-                if(self.msb_first):
-                    wr_data_rev = 0
-                    for byte_indx in range(self.width):
-                        wr_data_rev |= (wr_data  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
-                    self.axis_if.tdata.value = wr_data_rev
-                    wr_data = wr_data_rev
-                self.axis_if.tdata.value = wr_data
+                wr_data_int = 0
+                for byte_indx in range(self.width):
+                    wr_data_int |= data_list << (byte_indx * 8) 
+                self.axis_if.tdata.value = wr_data_int
+            elif(self.unpack == 'chisel_vec'):
+                for byte_indx in range(len(data_list)):
+                    self.axis_if.tdata[byte_indx].value = data_list[byte_indx]
             else:
                 assert False , f"[BAD_CONFIG] AXIS driver tdata in wrong format"
             #####################
@@ -126,7 +134,10 @@ class AxisDriver:
             #####################
             await RisingEdge(self.axis_if.aclk)
             if(self.axis_if.tready is None):
-                tnx_completed = self.axis_if.tvalid.value
+                if self.axis_if.tvalid is not None:
+                    tnx_completed = self.axis_if.tvalid.value
+                else:
+                    tnx_completed = 1
             else:
                 tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
             if(tnx_completed):
@@ -154,6 +165,7 @@ class AxisMonitor:
         self.static_pkt = static_pkt
         self.pkt_size = 0
         self.pkt_cntr = 0
+        print(f"unpack = {self.unpack}")
         
     async def mon_if(self):
         # Handle unpacked TDATA        
@@ -164,6 +176,7 @@ class AxisMonitor:
                 tnx_completed = self.axis_if.tvalid.value
             else:
                 tnx_completed = self.axis_if.tvalid.value and self.axis_if.tvalid.tready
+            # TODO: Unify tdata_int
             if(tnx_completed):
                 if(self.unpack == 'unpacked'):
                     tdata_int = 0
@@ -178,13 +191,15 @@ class AxisMonitor:
                         indx += 1                        
                 elif(self.unpack == 'packed'):                    
                     tdata_int = self.axis_if.tdata.value.integer
-                    if(self.width > 1):
+                    if(self.msb_first):
                         tdata_rev = 0
-                        for byte_indx in range(self.width):
-                            tdata_rev |= (tdata_int  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
-                    else:
-                        tdata_rev = tdata_int                    
-                    tdata_int = tdata_rev
+                        if(self.width > 1):                            
+                            for byte_indx in range(self.width):
+                                tdata_rev |= (tdata_int  >> (byte_indx * 8) & 0xFF) << ((self.width-1-byte_indx)*8)
+                        else:
+                            tdata_rev = tdata_int                    
+                        tdata_int = tdata_rev
+                    print(f"tdata_int = {tdata_int}")
                 elif(self.unpack == 'chisel_vec'):
                     tdata_int = 0
                     indx = 0
