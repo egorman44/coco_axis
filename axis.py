@@ -55,7 +55,16 @@ class AxisDriver:
     '''
     Functions that controlls different ports of AXIS interface
     '''
-    
+    def check_transaction_completion(self):
+        if(self.axis_if.tready is None):
+            if self.axis_if.tvalid is not None:
+                tnx_completed = self.axis_if.tvalid.value
+            else:
+                tnx_completed = 1
+        else:
+            tnx_completed = self.axis_if.tvalid.value and self.axis_if.tready.value
+        return tnx_completed
+        
     def drive_tlast(self, last_word):
         if(self.axis_if.tlast is not None):
             if(last_word):
@@ -128,59 +137,54 @@ class AxisDriver:
         else:
             assert False , f"[BAD_CONFIG] AXIS driver tdata in wrong format"
 
-    def drive_tvalid(self, tvalid_state):
+    def drive_tvalid(self, tnx_completed):
         if self.axis_if.tvalid is not None:
             if(self.flow_ctrl == 'flow_en'):
                 self.flow_ctrl = random.choice(['one_valid_one_nonvalid', 'one_valid_some_nonvalid', 'some_valid_some_nonvalid'])
-            if(self.flow_ctrl ==  'one_valid_one_nonvalid'):
-                if(self.axis_if.tready is None):
-                    if self.axis_if.tvalid is not None:
-                        tnx_completed = self.axis_if.tvalid.value
-                    else:
-                        tnx_completed = 1
-                else:
-                    tnx_completed = self.axis_if.tvalid.value and self.axis_if.tready.value
-                if tvalid_state:
+            
+            if(self.flow_ctrl ==  'one_valid_one_nonvalid'):                
+                if self.tvalid_state:
                     if tnx_completed:
-                        tvalid_state = 0                            
+                        self.tvalid_state = 0                            
                 else:
-                    tvalid_state = 1
-                self.axis_if.tvalid.value = tvalid_state
+                    self.tvalid_state = 1
+                self.axis_if.tvalid.value = self.tvalid_state
             elif(self.flow_ctrl == 'one_valid_some_nonvalid'):
-                if tvalid_state:
+                if self.tvalid_state:
                     tvalid_val = 1                        
-                    tvalid_delay = random.randint(1,5)
-                    tvalid_state = 0
+                    self.tvalid_delay = random.randint(1,5)
+                    self.tvalid_state = 0
                 else:
                     tvalid_val = 0
-                    if tvalid_delay:
-                        tvalid_delay -= 1
+                    if self.tvalid_delay:
+                        self.tvalid_delay -= 1
                     else:
-                        tvalid_state = 1
+                        self.tvalid_state = 1
                 self.axis_if.tvalid.value = tvalid_val
             elif(self.flow_ctrl == 'some_valid_some_nonvalid'):
-                if tvalid_delay:
-                    tvalid_delay -= 1
+                if self.tvalid_delay:
+                    self.tvalid_delay -= 1
                 else:
-                    tvalid_delay = random.randint(1,5)
-                    tvalid_val = tvalid_val ^ 1
-                self.axis_if.tvalid.value = tvalid_val
+                    self.tvalid_delay = random.randint(1,5)
+                    self.tvalid_state = self.tvalid_state ^ 1
+                self.axis_if.tvalid.value = self.tvalid_state
 
             else:
                 self.axis_if.tvalid.value = 1
         
 
     '''
-    send_pkt() is a main corouting that controls the packet sneding
+    send_pkt() is a main corouting that controls the packet transmition
 
     '''
     
     async def send_pkt(self, pkt):
         self.pkt = pkt
-        tvalid_state = 1        
+        self.tvalid_state = 1
+        self.tvalid_delay = random.randint(1,5)
         word_list = pkt.get_word_list(self.width)
         tvalid_val = 1
-        tvalid_delay = random.randint(1,5)
+        tnx_completed = 0
         for x in range(pkt.delay):
             await RisingEdge(self.axis_if.aclk)
         word_num = 0
@@ -198,15 +202,9 @@ class AxisDriver:
             self.drive_tuser(last_word)
             self.drive_tkeep(last_word)
             self.drive_tdata(last_word, word_num)
-            self.drive_tvalid(tvalid_state)
+            self.drive_tvalid(tnx_completed)
             await RisingEdge(self.axis_if.aclk)
-            if(self.axis_if.tready is None):
-                if self.axis_if.tvalid is not None:
-                    tnx_completed = self.axis_if.tvalid.value
-                else:
-                    tnx_completed = 1
-            else:
-                tnx_completed = self.axis_if.tvalid.value and self.axis_if.tready.value
+            tnx_completed = self.check_transaction_completion()
             if(tnx_completed):
                 word_num += 1                
             
@@ -214,7 +212,7 @@ class AxisDriver:
             self.axis_if.tvalid.value = 0
         if self.axis_if.tlast is not None:
             self.axis_if.tlast.value = 0
-        tvalid_state = 1
+        #tvalid_state = 1
         
 '''
 AxisMonitor
