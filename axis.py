@@ -8,18 +8,20 @@ from bin_operation import check_pos
 from cocotb.triggers import RisingEdge
 from cocotb.utils import get_sim_time
 
+# TODO: move all fields other that name/ports/width into the driver.
 class AxisIf:
-    def __init__(self, aclk, tdata, width, unpack, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, tkeep_type='packed', uwidth=None):
-        self.aclk   = aclk
-        self.tdata  = tdata
-        self.tvalid = tvalid
-        self.tkeep  = tkeep
-        self.tlast  = tlast
-        self.tuser  = tuser
-        self.tready = tready
-        self.width  = width
-        self.uwidth  = uwidth
-        self.unpack = unpack
+    def __init__(self, name, aclk, tdata, width, unpack, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, tkeep_type='packed', uwidth=None):
+        self.name       = name
+        self.aclk       = aclk
+        self.tdata      = tdata
+        self.tvalid     = tvalid
+        self.tkeep      = tkeep
+        self.tlast      = tlast
+        self.tuser      = tuser
+        self.tready     = tready
+        self.width      = width
+        self.uwidth     = uwidth
+        self.unpack     = unpack
         self.tkeep_type = tkeep_type        
 
 '''
@@ -94,6 +96,7 @@ class AxisDriver:
             self.axis_if.tkeep.value = tkeep
 
     def drive_tdata(self, pkt, last_word, word_num):
+
         # TODO: check that Endianess is matched for all combinations
         # Prepare data. Put it into the list
         data_list = [0] * self.width
@@ -133,7 +136,7 @@ class AxisDriver:
                 wr_data_int |= data_list[byte_indx] << (byte_indx * 8)
             self.axis_if.tdata.value = wr_data_int
         elif(self.unpack == 'chisel_vec'):
-            for byte_indx in range(len(data_list)):
+            for byte_indx in range(len(data_list)):                
                 self.axis_if.tdata[byte_indx].value = data_list[byte_indx]
         else:
             assert False , f"[BAD_CONFIG] AXIS driver tdata in wrong format"
@@ -284,7 +287,15 @@ class AxisMonitor:
         self.static_pkt = static_pkt
         self.pkt_size = 0
         self.pkt_cntr = 0
+        self.print_cfg()
 
+    def print_cfg(self):
+        print(f"\n\t MONITOR_CFG")
+        print(f"\t\t MONITOR_NAME : {self.name}")
+        print(f"\t\t WIDTH        : {self.width}")
+        print(f"\t\t UNPACK       : {self.unpack}")
+        print(f"\t\t PKT0_WORD0   : {self.pkt0_word0}")
+        
     def mon_tuser(self):
         if self.axis_if.tuser is not None:
             if self.axis_if.tlast is not None:
