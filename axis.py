@@ -7,7 +7,33 @@ from bin_operation import countones
 from bin_operation import check_pos
 from cocotb.triggers import RisingEdge
 from cocotb.utils import get_sim_time
+import ast
+from dataclasses import dataclass
 
+@dataclass
+class FlowCtrl:
+    tvalid_high_limit: int = 1
+    tvalid_low_limit: int = 0
+   
+def parse_flow_ctrl(flow_ctrl_input):
+    """Parses a string input and converts it to FlowCtrl dataclass."""
+    if isinstance(flow_ctrl_input, str):  # Ensure input is a string
+        try:
+            parsed_value = ast.literal_eval(flow_ctrl_input)  # Convert string to Python type
+
+            # If it's a tuple, unpack it into FlowCtrl
+            if isinstance(parsed_value, tuple) and len(parsed_value) == 2:
+                return FlowCtrl(*parsed_value)
+
+            # If it's a dictionary, use it to initialize FlowCtrl
+            elif isinstance(parsed_value, dict):
+                return FlowCtrl(**parsed_value)
+
+        except (SyntaxError, ValueError):
+            raise argparse.ArgumentTypeError(f"Invalid format for FlowCtrl: {flow_ctrl_input}")
+
+    return FlowCtrl()  # Return default if no valid input    
+    
 # TODO: move all fields other that name/ports/width into the driver.
 class AxisIf:
     def __init__(self, name, aclk, tdata, width, unpack, tvalid=None, tlast=None, tkeep=None, tuser=None, tready=None, tkeep_type='packed', uwidth=None):
@@ -32,20 +58,60 @@ class AxisDriver:
 
     '''
     pkt0_word0 - defines where packet first byte is mapped. 
-    If pkt0_word0 = 1, then packet[0] is mapped into TDATA[0]
-    If pkt0_word0 = 0, then packet[0] is mapped into TDATA[self.width-1]
+    If pkt0_word0 = 1, then first byte of the packet(packet[0]) is mapped into TDATA[0]
+    If pkt0_word0 = 0, then first byte of the packet(packet[0]) is mapped into TDATA[self.width-1]
     '''
 
-    def __init__(self, name, axis_if, pkt0_word0 = 1, flow_ctrl='always_on'):
+    def __init__(self, name, axis_if, pkt0_word0 = 1, flow_ctrl: FlowCtrl = FlowCtrl()):
         self.name      = name
         self.axis_if   = axis_if
         self.width     = axis_if.width
         self.unpack    = axis_if.unpack
         self.pkt0_word0 = pkt0_word0
         self.flow_ctrl = flow_ctrl
+        
+        # Map flow control mode to the corresponding function
+        self.drive_func = self._get_drive_function()
         self.print_cfg()
 
     
+    def _get_drive_function(self):
+        """Selects and returns the appropriate tvalid drive function."""
+        if self.flow_ctrl.tvalid_low_limit == 0:
+            return self._always_on
+        elif self.flow_ctrl.tvalid_high_limit == 1 and self.flow_ctrl.tvalid_low_limit == 1:
+            return self._one_valid_one_nonvalid
+        else:
+            return self._toggle_tvalid_with_random_delays            
+            
+    def _always_on(self, tnx_completed):
+        """Fallback case: Always drive tvalid as high."""
+        self.axis_if.tvalid.value = 1
+
+    def _one_valid_one_nonvalid(self, tnx_completed):
+        """Alternates between valid and non-valid states."""
+        if tnx_completed == 0:
+            self.axis_if.tvalid.value = 1
+        else:
+            self.axis_if.tvalid.value = 0        
+
+    def _toggle_tvalid_with_random_delays(self, tnx_completed):
+        """Randomly toggles between valid and non-valid states."""
+        if tnx_completed:
+            if self.tvalid_delay > 0:
+                self.tvalid_delay -= 1
+            else:
+                self.axis_if.tvalid.value = 0
+                self.tvalid_delay = random.randint(1, self.flow_ctrl.tvalid_low_limit)
+        elif self.axis_if.tvalid.value == 0:
+            if self.tvalid_delay > 0:
+                self.tvalid_delay -= 1
+            else:
+                self.axis_if.tvalid.value = 1
+                self.tvalid_delay = random.randint(1, self.flow_ctrl.tvalid_high_limit)
+                
+                
+        
     def print_cfg(self):
         print(f"\n\t DRIVER_CFG")
         print(f"\t\t DRIVER_NAME : {self.name}")
@@ -66,7 +132,11 @@ class AxisDriver:
         else:
             tnx_completed = self.axis_if.tvalid.value and self.axis_if.tready.value
         return tnx_completed
-        
+
+    def drive_tvalid(self, tnx_completed):
+        """Calls the pre-selected drive function."""
+        self.drive_func(tnx_completed)
+    
     def drive_tlast(self, last_word):
         if(self.axis_if.tlast is not None):
             if(last_word):
@@ -141,44 +211,6 @@ class AxisDriver:
         else:
             assert False , f"[BAD_CONFIG] AXIS driver tdata in wrong format"
 
-    def drive_tvalid(self, tnx_completed):
-        if self.axis_if.tvalid is not None:
-            if(self.flow_ctrl == 'flow_en'):
-                self.flow_ctrl = random.choice(['one_valid_one_nonvalid', 'one_valid_some_nonvalid', 'some_valid_some_nonvalid'])
-
-            time_ns = get_sim_time(units='ns')
-            if tnx_completed == 0:
-                self.axis_if.tvalid.value = 1
-            else:
-                if(self.flow_ctrl ==  'one_valid_one_nonvalid'):                
-                    if self.tvalid_state:
-                        if tnx_completed:
-                            self.tvalid_state = 0                            
-                    else:
-                        self.tvalid_state = 1
-                    self.axis_if.tvalid.value = self.tvalid_state
-                elif(self.flow_ctrl == 'one_valid_some_nonvalid'):
-                    if self.tvalid_state:
-                        tvalid_val = 1                        
-                        self.tvalid_delay = random.randint(1,5)
-                        self.tvalid_state = 0
-                    else:
-                        tvalid_val = 0
-                        if self.tvalid_delay:
-                            self.tvalid_delay -= 1
-                        else:
-                            self.tvalid_state = 1
-                    self.axis_if.tvalid.value = tvalid_val
-                elif(self.flow_ctrl == 'some_valid_some_nonvalid'):
-                    if self.tvalid_delay:
-                        self.tvalid_delay -= 1
-                    else:
-                        self.tvalid_delay = random.randint(1,5)
-                        self.tvalid_state = self.tvalid_state ^ 1
-                    self.axis_if.tvalid.value = self.tvalid_state
-    
-                else:
-                    self.axis_if.tvalid.value = 1
         
 
     '''
@@ -186,11 +218,11 @@ class AxisDriver:
     '''
     
     async def send_pkt(self, pkt):
-        self.tvalid_state = 1
-        self.tvalid_delay = random.randint(1,5)
         tnx_completed = 0
         for x in range(pkt.delay):
             await RisingEdge(self.axis_if.aclk)
+        self.axis_if.tvalid.value = 1
+        self.tvalid_delay = random.randint(1,5)        
         word_num = 0
         pkt_len_in_words = math.ceil(pkt.pkt_size/self.width)
         while word_num < pkt_len_in_words:
@@ -223,7 +255,7 @@ class AxisDriver:
     '''
     
     async def send_interleaved_pkts(self, pkts):
-        self.tvalid_state = 1
+        self.axis_if.tvalid.value = 1
         self.tvalid_delay = random.randint(1,5)
         self.current_index = 0
         pointers = [0] * len(pkts)
